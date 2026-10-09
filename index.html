@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>Needle</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" id="favicon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
 :root{
   --a:168,139,250; --d:3,7,18;
@@ -318,6 +321,10 @@ function applyTheme({accent,dark}){
   s.setProperty('--a',accent.join(','));
   s.setProperty('--d',dark.join(','));
   document.querySelector('meta[name="theme-color"]').content=rgbHex(...dark);
+  /* tab icon in this session's two colours */
+  const A=rgbHex(...accent),D=rgbHex(...dark);
+  const svg=`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='10' fill='${D}'/><circle cx='29' cy='35' r='21' fill='none' stroke='${A}' stroke-width='5'/><circle cx='29' cy='35' r='6' fill='${A}'/><path d='M53 8v16L41 38' fill='none' stroke='${A}' stroke-width='5'/></svg>`;
+  const fav=document.querySelector('#favicon');if(fav)fav.href='data:image/svg+xml,'+encodeURIComponent(svg);
 }
 applyTheme(generatePair());
 
@@ -616,15 +623,32 @@ function ctxTrack(s){return{uri:s.uri,id:s.id,name:s.name,
   artists:(s.artists||[]).map(a=>({id:a.uri?.split(':')[2],name:a.name})),
   album:{id:s.album?.uri?.split(':')[2],name:s.album?.name,img:pickImg(s.album?.images,100)},ms:s.duration_ms}}
 
+/* the playlist snapshot can be thousands of tracks: it lives under its own key, written once per station */
+function radioForStorage(r){
+  const o={...r,seen:[...r.seen],busy:false};
+  delete o.candidateWeights;
+  if(r.playlist)o.playlist={...r.playlist,tracks:null};
+  return o;
+}
+let stationSaved=null;   // immutable playlist snapshot array currently in storage
 function saveQueue(){
-  LS.set('queue',{queue,idx,origin,original,mode:mode==='queue'?'queue':'none',radio:radio&&{...radio,seen:[...radio.seen],busy:false}});
+  if(radio?.playlist?.tracks&&stationSaved!==radio.playlist.tracks){LS.set('station',{id:radio.playlist.id,tracks:radio.playlist.tracks});stationSaved=radio.playlist.tracks}
+  LS.set('queue',{queue,idx,origin,original,mode:mode==='queue'?'queue':'none',radio:radio&&radioForStorage(radio)});
   LS.set('shuffleOn',shuffleOn);
 }
 function restoreQueue(){
   const s=LS.get('queue',null);
   if(s&&s.mode==='queue'&&Array.isArray(s.queue)){
     queue=s.queue;idx=Math.min(s.idx,queue.length-1);origin=s.origin||'';
-    if(s.radio)radio={...s.radio,seen:new Set(s.radio.seen),busy:false};
+    if(s.radio){
+      radio={...s.radio,seen:new Set(s.radio.seen),busy:false};
+      delete radio.candidateWeights;
+      if(radio.playlist&&!Array.isArray(radio.playlist.tracks)){
+        const st=LS.get('station',null);
+        if(st?.id===radio.playlist.id&&Array.isArray(st.tracks)){radio.playlist.tracks=st.tracks;stationSaved=radio.playlist.tracks}
+        else radio=null;   /* snapshot missing: keep the queue, drop the station */
+      }
+    }
     /* rebuild identity between queue and original so un-shuffle works */
     if(Array.isArray(s.original)){
       const byUri=new Map();queue.forEach(t=>{const a=byUri.get(t.uri)||[];a.push(t);byUri.set(t.uri,a)});
@@ -1022,11 +1046,12 @@ async function radioBatch(r,opts={}){
   const searches=chosen.filter(Boolean).map(c=>artistTracks(c.name,6,reach>0.4));
   let found;
   if(r.playlist){
-    /* Settle every search before releasing the station's single generation slot. */
+    /* Settle every search before releasing the station's single generation slot.
+       One failed artist (rate limit, network blip) shouldn't sink the batch; only fail if all did. */
     const results=await Promise.allSettled(searches);
-    const failed=results.find(x=>x.status==='rejected');
-    if(failed)throw failed.reason;
-    found=results.map(x=>x.value);
+    const ok=results.filter(x=>x.status==='fulfilled');
+    if(results.length&&!ok.length)throw results[0].reason;
+    found=ok.map(x=>x.value);
   }else found=await Promise.all(searches.map(p=>p.catch(()=>[])));
   found.flat().forEach(addC);
   /* small artists often have no ListenBrainz neighbours: dig into the seed artist's own catalogue */
@@ -1079,8 +1104,9 @@ async function buildPlaylistBatch(r,mix,blocked,seen){
 function capturePlaylistQueue(){
   return {ref:queue,entries:queue.slice(),markers:queue.map(t=>t.blendStation),index:idx,station:radio,mode};
 }
-function matchesPlaylistQueue(s){
-  return queue===s.ref&&idx===s.index&&radio===s.station&&mode===s.mode&&queue.length===s.entries.length&&
+/* ignoreIndex: a song ending naturally mid-build is not a reason to abandon a station start */
+function matchesPlaylistQueue(s,ignoreIndex=false){
+  return queue===s.ref&&(ignoreIndex||idx===s.index)&&radio===s.station&&mode===s.mode&&queue.length===s.entries.length&&
     queue.every((t,i)=>t===s.entries[i]&&t.blendStation===s.markers[i]);
 }
 function commitPlaylistBatch(r,b,released=new Set(),protectedIds=new Set()){
@@ -1106,7 +1132,7 @@ async function startPlaylistRadio(tracks,p){
   try{
     const b=await buildPlaylistBatch(r,mix,new Set(),r.seen);
     if(token!==playlistStartVersion||view!==activeView||viewToken!==viewVersion||viewList!==loaded)return;
-    if(!matchesPlaylistQueue(captured))return toast('Playback changed; start playlist radio again');
+    if(!matchesPlaylistQueue(captured,true))return toast('Playback changed; start playlist radio again');
     if(!b.tracks.length)return toast('No eligible tracks found for this mix');
     commitPlaylistBatch(r,b);radio=r;origin='Playlist radio · '+p.name;original=null;
     const playing=mode==='queue'&&ps.active&&sameTrack(b.tracks[0],queue[idx])&&sameTrack(queue[idx],ps.track);
