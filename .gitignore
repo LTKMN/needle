@@ -1,0 +1,6 @@
+# local preview/test pages and deploy state
+preview*.html
+.netlify/
+node_modules/
+.DS_Store
+Thumbs.db
