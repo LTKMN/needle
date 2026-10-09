@@ -12,6 +12,8 @@ It's one self-contained `index.html`: no build step, no backend, no dependencies
   - *Order:* artist spread, freshness (push back recent plays), skip memory, liked boost, unheard boost
   - *Radio:* reach (how far from the seed), **underground** (from household names to bands with a handful of listeners)
 - **Genre trailheads.** Pick "punk", "drum and bass", "city pop" (or type any genre). Needle finds a good entry track for that genre and starts a station that stays in it.
+- **Playlist stations.** Open a readable playlist and choose **START PLAYLIST RADIO**. Needle snapshots all loaded tracks and uses artists across the playlist, weighted by their share of distinct songs. The **playlist mix** slider targets originals versus related discoveries: 0% is discovery-only, 100% is originals-only, and intermediate values fill shortages from the available side.
+- Change the mix in the source playlist or queue to rebuild upcoming station tracks. The current song, manually queued songs, and tracks explicitly moved to next stay in place. `P` marks source originals and `D` marks discoveries. Originals can recur in later batches; discoveries exclude every source song, including alternate versions. The snapshot and station mix survive reloads.
 - **Discover.** Seed artists in, unfamiliar related artists out, with an "adventure" control and a "not for me" ban list.
 - **Recently played** merges Needle's own instant play log with Spotify's history from your other devices.
 - Two-color theme, regenerated each session (◐ for a new one). Keyboard: `space` play/pause, `/` search, `shift+←/→` prev/next, `←/→` seek, `s` shuffle, `l` like, `r` radio.
@@ -47,8 +49,19 @@ Spotify's 2026 Web API changes for development-mode apps removed recommendations
 
 - **Playlists you don't own:** Spotify only lets development-mode apps read the contents of playlists you own or collaborate on. Followed playlists (marked ▫) still play, but through Spotify's own queue and shuffle. Save a copy to get Needle's shuffle and radio.
 - **Five users per app:** Spotify caps a development-mode app at five users. Each person should register their own Client ID.
-- **Brief stutter:** changing the very next track mid-song makes Needle resend the queue to Spotify, which can cause a short stutter.
+- **Queue changes:** editing upcoming tracks does not resend playback mid-song. Needle hands off to the updated next track at the current track's end.
 - **Tiny artists:** the smallest artists may not be on Spotify at all. Needle skips them, falling back to the seed artist's catalogue or your liked songs.
+- **Limited discovery supply:** endpoints never substitute the other side. Intermediate mixes are targets rather than guarantees when eligible tracks run short. Playlist stations stay anchored to their source artists and neighbours; they do not fill from unrelated liked songs or refetch later playlist edits.
+
+## Verification
+
+Run the synthetic playlist-radio regression suite with Node:
+
+```sh
+node --test tests/playlist-radio.test.cjs
+```
+
+The tests execute the application's inline script with inert browser/player boundaries. They cover mix selection, playlist snapshots, queue handoff, generation races, manual-track protection, persistence, and ordinary radio behavior without Spotify credentials or audio.
 
 ## License
 
