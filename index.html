@@ -630,9 +630,9 @@ function radioForStorage(r){
   if(r.playlist)o.playlist={...r.playlist,tracks:null};
   return o;
 }
-let stationSaved=null;   // id of the playlist snapshot currently in storage
+let stationSaved=null;   // immutable playlist snapshot array currently in storage
 function saveQueue(){
-  if(radio?.playlist?.tracks&&stationSaved!==radio.playlist.id){LS.set('station',{id:radio.playlist.id,tracks:radio.playlist.tracks});stationSaved=radio.playlist.id}
+  if(radio?.playlist?.tracks&&stationSaved!==radio.playlist.tracks){LS.set('station',{id:radio.playlist.id,tracks:radio.playlist.tracks});stationSaved=radio.playlist.tracks}
   LS.set('queue',{queue,idx,origin,original,mode:mode==='queue'?'queue':'none',radio:radio&&radioForStorage(radio)});
   LS.set('shuffleOn',shuffleOn);
 }
@@ -645,7 +645,7 @@ function restoreQueue(){
       delete radio.candidateWeights;
       if(radio.playlist&&!Array.isArray(radio.playlist.tracks)){
         const st=LS.get('station',null);
-        if(st?.id===radio.playlist.id&&Array.isArray(st.tracks)){radio.playlist.tracks=st.tracks;stationSaved=st.id}
+        if(st?.id===radio.playlist.id&&Array.isArray(st.tracks)){radio.playlist.tracks=st.tracks;stationSaved=radio.playlist.tracks}
         else radio=null;   /* snapshot missing: keep the queue, drop the station */
       }
     }
@@ -1122,6 +1122,7 @@ async function startPlaylistRadio(tracks,p){
   const sources=playlistSource(tracks);
   if(!sources.length)return toast('No playable tracks to seed this playlist');
   if(!deviceId)return toast('Player is not ready yet');
+  player?.activateElement?.();
   const activeView=view,loaded=viewList,viewVersion=viewToken,captured=capturePlaylistQueue();
   const button=main.querySelector('[data-act="playlist-radio"]');
   if(button){button.disabled=true;button.textContent='BUILDING…'}
@@ -1137,6 +1138,7 @@ async function startPlaylistRadio(tracks,p){
     const playing=mode==='queue'&&ps.active&&sameTrack(b.tracks[0],queue[idx])&&sameTrack(queue[idx],ps.track);
     if(playing){
       queue=[...queue.slice(0,idx+1),...b.tracks.slice(1)];markDirty();
+      requestPlaylistBatch(r);
     }else{
       if(mode==='queue'&&queue[idx]&&ps.active)record(queue[idx],curPos(),true);
       queue=b.tracks;idx=-1;await playAt(0);
@@ -1165,6 +1167,7 @@ function requestPlaylistBatch(r,{replace=false}={}){
 }
 async function runPlaylistJob(r,job){
   if(job.running||job.timer||!job.pending||radio!==r||mode!=='queue')return;
+  if(!job.replace&&queue.length-idx-1>=RADIO_LOW){job.pending=false;return}
   const replace=job.replace,version=job.version,captured=capturePlaylistQueue(),mix=r.playlist.mix;
   job.pending=false;job.replace=false;job.running=true;r.busy=true;renderQueue();
   const generated=t=>t.blendStation===r.playlist.id&&!!t.blendSource;

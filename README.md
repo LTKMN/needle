@@ -14,6 +14,7 @@ It's one self-contained `index.html`: no build step, no backend, no dependencies
 - **Genre trailheads.** Pick "punk", "drum and bass", "city pop" (or type any genre). Needle finds a good entry track for that genre and starts a station that stays in it.
 - **Playlist stations.** Open a readable playlist and choose **START PLAYLIST RADIO**. Needle snapshots all loaded tracks and uses artists across the playlist, weighted by their share of distinct songs. The **playlist mix** slider targets originals versus related discoveries: 0% is discovery-only, 100% is originals-only, and intermediate values fill shortages from the available side.
 - Change the mix in the source playlist or queue to rebuild upcoming station tracks. The current song, manually queued songs, and tracks explicitly moved to next stay in place. `P` marks source originals and `D` marks discoveries. Originals can recur in later batches; discoveries exclude every source song, including alternate versions. The snapshot and station mix survive reloads.
+- **Single-song stations.** Originals-only stations repeat a sole source. Starting one while its matching queue entry is playing preserves that entry and position and queues the next copy.
 - **Discover.** Seed artists in, unfamiliar related artists out, with an "adventure" control and a "not for me" ban list.
 - **Recently played** merges Needle's own instant play log with Spotify's history from your other devices.
 - Two-color theme, regenerated each session (◐ for a new one). Keyboard: `space` play/pause, `/` search, `shift+←/→` prev/next, `←/→` seek, `s` shuffle, `l` like, `r` radio.
@@ -62,7 +63,7 @@ Run the synthetic playlist-radio regression suite with Node:
 node --test tests/playlist-radio.test.cjs
 ```
 
-The tests execute the application's inline script with inert browser/player boundaries. They cover mix selection, playlist snapshots, queue handoff, generation races, manual-track protection, persistence, and ordinary radio behavior without Spotify credentials or audio.
+The tests execute the application's inline script with inert browser/player boundaries. They cover full playlist pagination, mix selection, current/manual entry identity, queue handoff, serialized generation and low-water retries, synchronous SDK activation, persistence, control nesting, and ordinary radio behavior without Spotify credentials or audio. SDK activation tests check call ordering, not live autoplay or DRM.
 
 ## License
 
