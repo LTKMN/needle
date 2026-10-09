@@ -712,11 +712,17 @@ function syncNext(){
     sendWindow(idx,0);saveQueue();renderQueue();markCurrent();maybeExtendRadio();
     return;
   }
-  if(!ps.active||switching||offQueue)return;
   const want=queue[idx+1]?.uri,have=sent.uris[idx+1-sent.start];
-  if(want===have)return;
-  dirty=true;
-  if(!ps.paused)sendWindow(idx,curPos());
+  if(want!==have)dirty=true;   /* handed over at the end of this track (handoff / onState), never mid-song */
+}
+/* Spotify's next track is stale: start the right one ourselves just before this one ends */
+const HANDOFF_MS=1500;
+function handoff(){
+  if(mode!=='queue'||!dirty||!ps.active||ps.paused||switching||offQueue||!queue[idx+1])return;
+  if(ps.dur-curPos()>HANDOFF_MS)return;
+  record(queue[idx],ps.dur,false);
+  idx++;sendWindow(idx,0);
+  saveQueue();renderQueue();markCurrent();maybeExtendRadio();
 }
 function addToQueue(ts){
   const c=ts.filter(t=>t.playable!==false).map(t=>({...t}));
@@ -1016,7 +1022,6 @@ function togglePlay(){
     if(idx<0&&queue.length)return playAt(0);
     if(ended)return playAt(idx);
     if(!ps.active&&idx>=0)return sendWindow(idx,0);
-    if(ps.paused&&dirty&&idx>=0)return sendWindow(idx,curPos());
   }
   player?.togglePlay();
 }
@@ -1045,6 +1050,14 @@ function onState(s){
   }
   const winEnd=sent?Math.min(queue.length,sent.start+sent.uris.length):queue.length;
   if(!match(queue[idx])){
+    const stale=sent&&sent.uris[idx+1-sent.start];
+    if(dirty&&stale&&queue[idx+1]&&!match(queue[idx+1])&&(cur?.uri===stale||cur?.linked_from?.uri===stale)){
+      /* the handoff was missed (e.g. throttled background tab) and Spotify played its old next track */
+      record(queue[idx],prevEst,false);
+      idx++;sendWindow(idx,0);
+      saveQueue();renderQueue();markCurrent();maybeExtendRadio();renderNow();renderPlayer();
+      return;
+    }
     /* moved on: look forward through what Spotify was given, then anywhere */
     let j=-1;
     for(let k=idx+1;k<winEnd;k++)if(match(queue[k])){j=k;break}
@@ -1389,6 +1402,7 @@ function tick(){
   const d=ps.active?ps.dur:(curTrack()?.ms||0),p=curPos();
   $('#tpos').textContent=fmt(p);$('#tdur').textContent=fmt(d);
   $('#barFill').style.width=(d?Math.min(100,p/d*100):0)+'%';
+  handoff();
 }
 setInterval(tick,250);
 
