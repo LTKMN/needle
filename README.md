@@ -32,6 +32,7 @@ You need **Spotify Premium** (Family plan members count). The Web Playback SDK r
    - **Redirect URI:** the exact URL you open, e.g. `http://127.0.0.1:8888/`. The setup screen shows it.
    - **APIs used:** Web API and Web Playback SDK.
 3. Open the page, paste your app's **Client ID**, and log in.
+4. Optional: install it as an app (Chrome: ⋮ → Cast, save, and share → *Install page as app*; Edge: ⋯ → Apps → *Install Needle*) so it gets its own window and taskbar icon. In Chrome, adding the site under `chrome://settings/performance` → *Always keep these sites active* stops Memory Saver from unloading it while paused.
 
 Login uses PKCE, so there's no client secret and no server. The Client ID, tokens, history and settings stay in your browser's `localStorage`. Nothing is sent anywhere except the services listed below.
 

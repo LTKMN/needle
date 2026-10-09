@@ -173,3 +173,28 @@ test('playlist startup activates the SDK before deferred generation without chan
   assert.equal(playbackCalls.length, 1);
   assert.equal(playbackCalls[0].uris[0], source.uri);
 });
+
+test('restarting the same playlist persists its new source snapshot across reload', async () => {
+  const h = createHarness();
+  const first = track('Earlier Source', 'Playlist Artist');
+  const latest = track('Latest Source', 'Playlist Artist');
+  h.set('api', async () => null);
+  h.run("deviceId='ready';playlistMix=100;view={type:'playlist',arg:'playlist-1'}");
+  h.context.__sources = [first];
+  h.run('viewList=globalThis.__sources');
+  await h.run("startPlaylistRadio(viewList,{id:'playlist-1',name:'Snapshot'})");
+  await settle();
+  assert.deepEqual(JSON.parse(h.storage.get('ndl.station')).tracks.map(t => t.uri), [first.uri]);
+
+  h.context.__sources = [latest];
+  h.run('viewList=globalThis.__sources');
+  await h.run("startPlaylistRadio(viewList,{id:'playlist-1',name:'Snapshot'})");
+  await settle();
+  const stored = JSON.parse(h.storage.get('ndl.queue'));
+  const snapshot = JSON.parse(h.storage.get('ndl.station'));
+  const restored = createHarness({ storage: { queue: stored, station: snapshot } });
+  restored.run('restoreQueue()');
+  assert.deepEqual(restored.json('radio.playlist.tracks.map(t=>t.uri)'), [latest.uri]);
+  assert.equal(restored.run('radio.playlist.mix'), 100);
+  assert.deepEqual(restored.json('queue.map(t=>t.uri)'), h.json('queue.map(t=>t.uri)'));
+});

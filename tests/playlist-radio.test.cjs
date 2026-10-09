@@ -379,8 +379,9 @@ test('playlist station persists, restores, rebuilds, extends, and loops a sole s
   h.context.__seenTrack = upcoming;
   h.run('radio.seen.add(globalThis.__seenTrack.uri);radio.seen.add(songKey(globalThis.__seenTrack));saveQueue()');
   const stored = JSON.parse(h.storage.get('ndl.queue'));
+  const snapshot = JSON.parse(h.storage.get('ndl.station'));
 
-  const restored = createHarness({ storage: { queue: stored, playlistMix: 12 }, random: () => 0.67 });
+  const restored = createHarness({ storage: { queue: stored, station: snapshot, playlistMix: 12 }, random: () => 0.67 });
   restored.run('restoreQueue()');
   assert.equal(restored.run('radio.playlist.mix'), 65);
   assert.deepEqual(restored.json('radio.playlist.tracks'), h.json('radio.playlist.tracks'));
@@ -583,5 +584,62 @@ test('preparing a different playlist changes preference but not the active stati
   h.document.dispatch('click',{target:{closest:selector=>selector==='[data-act]'?{dataset:{act:'resetsh'},closest:()=>null}:null}});
   assert.equal(h.run('playlistMix'),83,'shuffle reset does not reset the mix preference');
 });
+test('one failed artist search does not sink a playlist batch; all searches failing still does', async () => {
+  const h = createHarness();
+  const sources = sourceTracks(24, 8);
+  station(h, sources, 0);
+  h.context.__sourcesForCache = sources;
+  installCatalogue(h);
+  h.run(`{const inner=artistTracks;artistTracks=async function(name){
+    if(name==='Seed 1')throw new Error('429');
+    return inner(name);
+  }}`);
+  const partial = await build(h, 0);
+  assert.equal(partial.tracks.length, 20, 'the seven healthy artists still fill the batch');
+  assert.ok(partial.tracks.every(t => t.blendSource === 'discovery'));
+  assert.ok(partial.tracks.every(t => !t.artists.some(a => a.name === 'Seed 1')));
+
+  put(h, 'artistTracks', async () => { throw new Error('offline'); });
+  await assert.rejects(build(h, 0), /offline/);
+});
+
+test('a song ending naturally while a station builds does not abort the start', async () => {
+  const h = createHarness();
+  const playing = [track('Before A', 'Elsewhere'), track('Before B', 'Elsewhere')];
+  setPlayback(h, playing, 0);
+  h.run('deviceId="ready";playlistMix=50');
+  const sources = sourceTracks(24, 8);
+  h.context.__sourcesForCache = sources;
+  installCatalogue(h);
+  const gate = deferred();
+  h.context.__gate = gate.promise;
+  h.run(`{const inner=artistTracks;artistTracks=async function(name){
+    await globalThis.__gate;
+    return inner(name);
+  }}`);
+  h.context.__src = sources;
+  const starting = h.run("startPlaylistRadio(globalThis.__src,{id:'p-natural',name:'Natural'})");
+  h.run('idx=1');   // Spotify moved on to the next song mid-build.
+  gate.resolve();
+  await starting;
+  await settle();
+  assert.equal(h.run('radio?.playlist?.id'), 'p-natural');
+});
+
+test('restoring without the stored snapshot keeps the queue and drops the station', () => {
+  const h = createHarness();
+  const sources = sourceTracks(6, 3);
+  station(h, sources, 50);
+  const queued = [{ ...sources[0], radio: true }, { ...sources[1], radio: true }];
+  setPlayback(h, queued, 0, false);
+  h.run('saveQueue()');
+  const stored = JSON.parse(h.storage.get('ndl.queue'));
+  const restored = createHarness({ storage: { queue: stored } });
+  restored.run('restoreQueue()');
+  assert.equal(restored.run('radio'), null);
+  assert.equal(restored.run('queue.length'), 2);
+  assert.deepEqual(restored.json('queue').map(t => t.uri), queued.map(t => t.uri));
+});
+
 require('./playlist-radio-dom.cases.cjs');
 require('./playlist-radio-regressions.cjs');
