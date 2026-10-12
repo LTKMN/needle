@@ -40,6 +40,14 @@ h1{font-size:20px;font-weight:700;letter-spacing:.04em}
 h2{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:22px 0 8px}
 .muted{color:var(--faint)}
 .hidden{display:none!important}
+.menu{position:fixed;z-index:40;min-width:236px;max-width:min(360px,calc(100vw - 16px));max-height:calc(100vh - 16px);overflow:auto;background:var(--D);border:1px solid var(--line);box-shadow:0 8px 26px rgba(var(--d),.7);padding:6px}
+.menu .mtitle{padding:7px 9px 8px;border-bottom:1px solid var(--line);margin-bottom:4px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.menu .msection{padding:6px 9px 3px;color:var(--faint);font-size:11px;letter-spacing:.12em;text-transform:uppercase}
+.menu button{display:block;width:100%;border:0;text-align:left;padding:7px 9px;overflow:hidden;text-overflow:ellipsis}
+.menu button:hover,.menu button:focus-visible{background:var(--A);color:var(--D);outline:none}
+.menu button:disabled{opacity:.38;background:none;color:var(--A)}
+.menu .merror{border:1px solid var(--A);padding:7px 9px;margin:4px 2px 6px;white-space:normal}
+.menu .mempty{padding:8px 9px;color:var(--faint)}
 
 /* layout */
 #app{display:grid;height:100vh;height:100dvh;
@@ -286,7 +294,8 @@ input[type=range]:disabled{opacity:.4;cursor:default}
   </footer>
 </div>
 
-<div id="toast"></div>
+<div id="trackMenu" class="menu hidden" role="menu" aria-label="Track actions" aria-labelledby="trackMenuTitle" tabindex="-1"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 /* ═══════════════════════════════════════
@@ -349,7 +358,7 @@ const lc=s=>(s||'').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g,'').trim(
 /* ═══════════════════════════════════════
    AUTH — PKCE, no secret
    ═══════════════════════════════════════ */
-const SCOPES='streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state user-library-read user-library-modify playlist-read-private playlist-read-collaborative user-read-recently-played user-top-read';
+const SCOPES='streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state user-library-read user-library-modify playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private user-read-recently-played user-top-read';
 const REDIRECT=location.origin+location.pathname.replace(/index\.html$/,'');
 let clientId=LS.get('clientId','');
 let tok=LS.get('tok',null);
@@ -410,7 +419,10 @@ async function api(path,opts={},tries=0){
   }
   if(r.status===204||r.status===202)return null;
   const t=await r.text();let j=null;try{j=t?JSON.parse(t):null}catch{}
-  if(!r.ok)throw new Error(j?.error?.message||('HTTP '+r.status+' on '+path));
+  if(!r.ok){
+    const error=new Error(j?.error?.message||('HTTP '+r.status+' on '+path));
+    error.status=r.status;throw error;
+  }
   return j;
 }
 /* follow `next` links; map each page's items */
@@ -446,6 +458,8 @@ let hist=LS.get('hist',{});           // uri -> {p:plays,s:skips,l:lastPlayedTs}
 let histT;const saveHist=()=>{clearTimeout(histT);histT=setTimeout(()=>LS.set('hist',hist),1000)};
 let liked=[],likedSet=new Set();
 let playlists=[];
+let browserMenuOnce=false;
+LS.del('nativeContextMenu');
 let banned=new Set(LS.get('banned',[]));
 
 let playLog=LS.get('plays',[]);   // [{t, at}], newest first: Needle's own listening history
@@ -506,6 +520,25 @@ async function loadPlaylists(){
     readable:p.owner?.id===me?.id||p.collaborative});
   $('#pls').innerHTML=playlists.map(p=>`<a class="it" data-go="playlist" data-id="${esc(p.id)}" title="${esc(p.name)}${p.readable?'':' (play only)'}">${p.readable?'▪':'▫'} ${esc(p.name)}</a>`).join('')||'<div class="it muted">none</div>';
   markNav();
+}
+function writablePlaylists(){
+  return playlists.filter(p=>p.collab||(me?.id&&p.ownerId===me.id));
+}
+async function addTrackToPlaylist(t,playlistId){
+  if(!t?.uri?.startsWith('spotify:track:')||t.is_local)throw new Error('Only Spotify tracks can be added to a playlist');
+  const p=writablePlaylists().find(p=>p.id===playlistId);
+  if(!p)throw new Error('This playlist is not editable');
+  try{
+    await api('/playlists/'+encodeURIComponent(p.id)+'/items',{method:'POST',body:{uris:[t.uri]}});
+  }catch(e){
+    if(e.status===403)e.message='Playlist access denied. Reconnect Spotify to allow playlist editing, and check your access to this playlist.';
+    throw e;
+  }
+  const current=playlists.find(x=>x.id===p.id);
+  if(current&&typeof current.total==='number')current.total++;
+  toast('Added to '+p.name);
+  /* Refresh the displayed playlist, not a running station's frozen snapshot. */
+  if(view.type==='playlist'&&view.arg===p.id)await render();
 }
 
 /* ═══════════════════════════════════════
@@ -630,9 +663,9 @@ function radioForStorage(r){
   if(r.playlist)o.playlist={...r.playlist,tracks:null};
   return o;
 }
-let stationSaved=null;   // id of the playlist snapshot currently in storage
+let stationSaved=null;   // immutable playlist snapshot array currently in storage
 function saveQueue(){
-  if(radio?.playlist?.tracks&&stationSaved!==radio.playlist.id){LS.set('station',{id:radio.playlist.id,tracks:radio.playlist.tracks});stationSaved=radio.playlist.id}
+  if(radio?.playlist?.tracks&&stationSaved!==radio.playlist.tracks){LS.set('station',{id:radio.playlist.id,tracks:radio.playlist.tracks});stationSaved=radio.playlist.tracks}
   LS.set('queue',{queue,idx,origin,original,mode:mode==='queue'?'queue':'none',radio:radio&&radioForStorage(radio)});
   LS.set('shuffleOn',shuffleOn);
 }
@@ -645,7 +678,7 @@ function restoreQueue(){
       delete radio.candidateWeights;
       if(radio.playlist&&!Array.isArray(radio.playlist.tracks)){
         const st=LS.get('station',null);
-        if(st?.id===radio.playlist.id&&Array.isArray(st.tracks)){radio.playlist.tracks=st.tracks;stationSaved=st.id}
+        if(st?.id===radio.playlist.id&&Array.isArray(st.tracks)){radio.playlist.tracks=st.tracks;stationSaved=radio.playlist.tracks}
         else radio=null;   /* snapshot missing: keep the queue, drop the station */
       }
     }
@@ -674,22 +707,32 @@ function initSDK(){
   const s=document.createElement('script');s.src='https://sdk.scdn.co/spotify-player.js';document.head.appendChild(s);
 }
 
-let prefsSet=false;
+let prefsSet=false,windowSend=Promise.resolve();
 async function sendWindow(i,pos=0){
   if(!deviceId){toast('Player is not ready yet');return}
   if(!queue[i])return;
   mode='queue';
   const uris=queue.slice(i,i+WIN).map(t=>t.uri);
-  sent={start:i,uris};dirty=false;ended=false;
-  switching={i,until:Date.now()+5000};offQueue=false;ranOut=false;
-  try{
-    await api('/me/player/play',{method:'PUT',query:{device_id:deviceId},body:{uris,position_ms:Math.max(0,Math.floor(pos))}});
-  }catch(e){switching=null;toast(e.message);return}
-  if(!prefsSet){
-    prefsSet=true;
-    api('/me/player/shuffle',{method:'PUT',query:{state:false,device_id:deviceId}}).catch(()=>{});
-    api('/me/player/repeat',{method:'PUT',query:{state:'off',device_id:deviceId}}).catch(()=>{});
-  }
+  const window=sent={start:i,uris};dirty=false;ended=false;
+  switching={i,pending:true,until:Infinity};offQueue=false;ranOut=false;
+  /* Spotify does not order simultaneous playback commands; obsolete waiting windows are skipped. */
+  windowSend=windowSend.then(async()=>{
+    if(sent!==window||mode!=='queue')return;
+    try{
+      await api('/me/player/play',{method:'PUT',query:{device_id:deviceId},body:{uris,position_ms:Math.max(0,Math.floor(pos))}});
+    }catch(e){
+      if(sent===window&&mode==='queue'){switching=null;toast(e.message)}
+      return;
+    }
+    if(sent!==window||mode!=='queue')return;
+    switching.pending=false;switching.until=Date.now()+5000;
+    if(!prefsSet){
+      prefsSet=true;
+      api('/me/player/shuffle',{method:'PUT',query:{state:false,device_id:deviceId}}).catch(()=>{});
+      api('/me/player/repeat',{method:'PUT',query:{state:'off',device_id:deviceId}}).catch(()=>{});
+    }
+  });
+  await windowSend;
 }
 async function playAt(i,user=true){
   if(i<0||i>=queue.length)return;
@@ -995,24 +1038,156 @@ async function neighboursFor(name){
 }
 const nbSummary=nb=>{const n=t=>nb.filter(x=>x.src===t).length;return[n('lb')&&n('lb')+' via ListenBrainz',n('collab')&&n('collab')+' collaborators',n('deezer')&&n('deezer')+' via Deezer'].filter(Boolean).join(' · ')||'nothing found'};
 const radioNeighbours=neighboursFor;
+function weightedArtistPick(list,weight){
+  if(!list.length)return null;
+  const ws=list.map(weight),total=ws.reduce((a,w)=>a+w,0);
+  let n=Math.random()*total;
+  for(let i=0;i<list.length;i++){n-=ws[i];if(n<=0)return list[i]}
+  return list[list.length-1];
+}
+async function playlistRadioBatch(r,count,seen,commit){
+  const reach=sh.reach/100;
+  const artists=r.artists||[],limit=Math.min(8,artists.length);
+  if(!limit)return [];
+  const cursor=((Number.isInteger(r.anchorCursor)?r.anchorCursor:0)%artists.length+artists.length)%artists.length;
+  const anchors=Array.from({length:limit},(_,i)=>artists[(cursor+i)%artists.length]);
+  const branches=anchors.map(anchor=>({anchor,candidates:new Map()}));
+  const art=new Map();
+  const put=(name,sim,mbid,fans)=>{
+    const k=lc(name);if(!name||banned.has(k))return null;
+    const old=art.get(k);
+    if(!old||old.sim<sim)art.set(k,{name,sim,mbid:mbid||old?.mbid,fans:fans??old?.fans});
+    else{if(mbid&&!old.mbid)old.mbid=mbid;if(fans!=null&&old.fans==null)old.fans=fans}
+    return art.get(k);
+  };
+  const branchPut=(branch,c,scale=1)=>{
+    const x=put(c.name,c.sim*scale,c.mbid,c.fans);if(!x)return;
+    const k=lc(c.name),old=branch.candidates.get(k);
+    if(!old||old.sim<c.sim*scale)branch.candidates.set(k,{...x,sim:c.sim*scale});
+  };
+  anchors.forEach((a,i)=>branchPut(branches[i],{name:a.name,sim:1,mbid:a.mbid}));
+  const under=Math.max(0,(sh.under-50)/50);
+  const win=Math.round(10+reach*60+under*30);
+  /* One direct graph lookup per anchor; the optional second hop is also one
+     lookup per anchor and is sampled rather than always taking the first item. */
+  for(const b of branches){
+    const direct=await radioNeighbours(b.anchor.name);
+    const anchorMbid=mbidCache(b.anchor.name);
+    if(anchorMbid){
+      put(b.anchor.name,1,anchorMbid);
+      const anchorCandidate=b.candidates.get(lc(b.anchor.name));
+      if(anchorCandidate)anchorCandidate.mbid=anchorMbid;
+    }
+    direct.slice(0,win).forEach(x=>branchPut(b,x,b.anchor===anchors[0]?1:0.8));
+    if(reach>0.6&&direct.length){
+      const first=weightedArtistPick(direct.slice(0,win),x=>Math.max(0.02,x.sim));
+      const second=await radioNeighbours(first.name);
+      second.slice(0,win).forEach(x=>branchPut(b,x,0.7*first.sim));
+    }
+  }
+  await popularity([...art.values()].map(c=>c.mbid));
+  const usersOf=c=>c?.mbid&&c.mbid in popCache?popCache[c.mbid]:c?.fans??null;
+  const simW=s=>Math.pow(Math.max(s,0.02),2.5*(1-reach)+0.2);
+  const score=c=>simW(c.sim)*fameMult(usersOf(c));
+  /* Take artist turns branch-by-branch. Reserve branch-unique artists on
+     each first turn so a shared neighbour cannot consume a later branch. */
+  const branchCounts=new Map();
+  branches.forEach(b=>b.candidates.forEach((_,k)=>branchCounts.set(k,(branchCounts.get(k)||0)+1)));
+  const selected=[],usedArtists=new Set();
+  while(selected.length<20){
+    let progressed=false;
+    for(const b of branches){
+      const available=[...b.candidates.values()].filter(c=>!usedArtists.has(lc(c.name)));
+      const unique=available.filter(c=>branchCounts.get(lc(c.name))===1);
+      const c=weightedArtistPick(unique.length?unique:available,score);
+      if(!c)continue;
+      usedArtists.add(lc(c.name));selected.push(c);progressed=true;
+      if(selected.length>=20)break;
+    }
+    if(!progressed)break;
+  }
+  const cand=new Map(),keys=new Set();
+  const addC=t=>{
+    if(!t||t.playable===false||seen.has(t.uri)||cand.has(t.uri))return;
+    if(!t.artists?.length||t.artists.some(a=>banned.has(lc(a.name))))return;
+    if(!t.uri)return;
+    const k=songKey(t);if(seen.has(k)||keys.has(k))return;
+    if(!t.artists.some(a=>art.has(lc(a.name))))return;
+    keys.add(k);cand.set(t.uri,t);
+  };
+  liked.forEach(t=>{if(t.artists.some(a=>art.has(lc(a.name))))addC(t)});
+  const searches=selected.map(c=>artistTracks(c.name,6,reach>0.4));
+  const results=await Promise.allSettled(searches);
+  const ok=results.filter(x=>x.status==='fulfilled');
+  if(results.length&&!ok.length)throw results[0].reason;
+  ok.forEach(x=>x.value.forEach(addC));
+  if(cand.size<count){
+    r.albumsDone??=[];
+    for(const b of branches){
+      const a=b.anchor;
+      if(!a.id)continue;
+      const als=await api('/artists/'+a.id+'/albums',{query:{include_groups:'album,single',limit:10}})
+        .then(j=>j.items||[]);
+      for(const al of als.filter(al=>!r.albumsDone.includes(al.id)).slice(0,4)){
+        r.albumsDone.push(al.id);
+        const j=await api('/albums/'+al.id);
+        (j?.tracks?.items||[]).forEach(t=>addC(norm(t,{id:j.id,name:j.name,images:j.images})));
+      }
+    }
+  }
+  const artOf=t=>art.get(lc(t.artists[0]?.name))||t.artists.map(a=>art.get(lc(a.name))).find(Boolean);
+  const mult=t=>{
+    const sim=Math.max(...t.artists.map(a=>art.get(lc(a.name))?.sim||0));
+    return simW(sim||0.05)*fameMult(usersOf(artOf(t)));
+  };
+  const groups=new Map(),groupOrder=[];
+  selected.forEach(c=>{const k=lc(c.name);if(!groups.has(k)){groups.set(k,[]);groupOrder.push(k)}});
+  for(const t of cand.values()){
+    const k=lc(t.artists[0]?.name||'');
+    if(!groups.has(k)){groups.set(k,[]);groupOrder.push(k)}
+    groups.get(k).push(t);
+  }
+  const orderGroup=g=>{
+    const ordered=g.map(t=>({t,k:Math.log(Math.random())/(weightOf(t)*mult(t))}))
+      .sort((a,b)=>b.k-a.k).map(x=>x.t);
+    g.splice(0,g.length,...ordered);
+  };
+  groups.forEach(orderGroup);
+  /* Prefixes are branch-balanced and artist-distinct before repeated artists;
+     liked/loose groups join this first pass instead of waiting until repeats. */
+  const ordered=[];
+  for(let round=0;ordered.length<count;round++){
+    let added=false;
+    for(const k of groupOrder){
+      const t=groups.get(k)?.[round];
+      if(t){ordered.push(t);added=true;if(ordered.length>=count)break}
+    }
+    if(!added)break;
+  }
+  const out=ordered.slice(0,count).map(t=>({...t,radio:true,lb:usersOf(artOf(t))??undefined}));
+  r.candidateWeights=new Map(out.map(t=>[t.uri,mult(t)]));
+  r.anchorCursor=(cursor+limit)%artists.length;
+  if(commit)out.forEach(t=>{r.seen.add(t.uri);r.seen.add(songKey(t))});
+  return out;
+}
 async function radioBatch(r,opts={}){
   const {count=RADIO_BATCH,seen=r.seen,commit=true}=opts;
   if(count===0)return [];
-  const reach=sh.reach/100;
-  const anchors=r.playlist?r.artists.map(a=>({a,k:Math.log(Math.random())/a.weight}))
-    .sort((a,b)=>b.k-a.k).slice(0,4).map(x=>x.a):r.artists;
-  const seeds=anchors.map(a=>a.name);
-  if(!r.playlist){
-    const kept=queue.slice(0,idx+1).filter(t=>t.radio&&hist[t.uri]?.p&&hist[t.uri].l>=r.started).map(t=>t.artists[0]?.name);
-    const driftN=Math.round(reach*3);
-    for(const n of [...new Set(kept)].reverse().slice(0,driftN))if(!seeds.some(s=>lc(s)===lc(n)))seeds.push(n);
+  if(r.playlist){
+    const target=commit?r:{...r,seen:new Set(r.seen),albumsDone:[...(r.albumsDone||[])]};
+    return playlistRadioBatch(target,count,seen,commit);
   }
+  const reach=sh.reach/100;
+  const anchors=r.artists;
+  const seeds=anchors.map(a=>a.name);
+  const kept=queue.slice(0,idx+1).filter(t=>t.radio&&hist[t.uri]?.p&&hist[t.uri].l>=r.started).map(t=>t.artists[0]?.name);
+  const driftN=Math.round(reach*3);
+  for(const n of [...new Set(kept)].reverse().slice(0,driftN))if(!seeds.some(s=>lc(s)===lc(n)))seeds.push(n);
 
   /* artist pool with similarity scores */
   const art=new Map();
   const put=(name,sim,mbid,fans)=>{const k=lc(name);if(banned.has(k))return;const c=art.get(k);if(!c||c.sim<sim)art.set(k,{name,sim,mbid:mbid||c?.mbid,fans:fans??c?.fans});else{if(mbid&&!c.mbid)c.mbid=mbid;if(fans!=null&&c.fans==null)c.fans=fans}};
-  if(r.playlist)r.artists.forEach(a=>put(a.name,0.75));
-  seeds.forEach((n,i)=>put(n,r.playlist||i<r.artists.length?1:0.8));
+  seeds.forEach((n,i)=>put(n,i<r.artists.length?1:0.8));
   /* genre stations: the genre's artists stay candidates so the station doesn't drift off-genre */
   (r.pool||[]).forEach(c=>put(c.artist,0.75,c.mbid));
   const under=Math.max(0,(sh.under-50)/50);
@@ -1037,38 +1212,29 @@ async function radioBatch(r,opts={}){
   const keys=new Set();
   const addC=t=>{
     if(!t||t.playable===false||seen.has(t.uri)||cand.has(t.uri))return;
-    if(r.playlist&&(!t.artists?.some(a=>art.has(lc(a.name)))||t.artists.some(a=>banned.has(lc(a.name)))))return;
     const k=songKey(t);if(seen.has(k)||keys.has(k))return;keys.add(k);cand.set(t.uri,t);
   };
   /* library: liked songs by any artist in the pool */
   liked.forEach(t=>{if(t.artists.some(a=>art.has(lc(a.name))))addC(t)});
   /* fresh: spotify search per chosen artist */
   const searches=chosen.filter(Boolean).map(c=>artistTracks(c.name,6,reach>0.4));
-  let found;
-  if(r.playlist){
-    /* Settle every search before releasing the station's single generation slot.
-       One failed artist (rate limit, network blip) shouldn't sink the batch; only fail if all did. */
-    const results=await Promise.allSettled(searches);
-    const ok=results.filter(x=>x.status==='fulfilled');
-    if(results.length&&!ok.length)throw results[0].reason;
-    found=ok.map(x=>x.value);
-  }else found=await Promise.all(searches.map(p=>p.catch(()=>[])));
+  const found=await Promise.all(searches.map(p=>p.catch(()=>[])));
   found.flat().forEach(addC);
   /* small artists often have no ListenBrainz neighbours: dig into the seed artist's own catalogue */
   if(cand.size<count){
     r.albumsDone??=[];
-    for(const a of (r.playlist?anchors:r.artists).filter(a=>a.id)){
+    for(const a of r.artists.filter(a=>a.id)){
       const als=await api('/artists/'+a.id+'/albums',{query:{include_groups:'album,single',limit:10}})
-        .then(j=>j.items||[]).catch(e=>{if(r.playlist)throw e;return []});
+        .then(j=>j.items||[]).catch(()=>[]);
       for(const al of als.filter(al=>!r.albumsDone.includes(al.id)).slice(0,4)){
         r.albumsDone.push(al.id);
-        const j=await api('/albums/'+al.id).catch(e=>{if(r.playlist)throw e;return null});
+        const j=await api('/albums/'+al.id).catch(()=>null);
         (j?.tracks?.items||[]).forEach(t=>addC(norm(t,{id:j.id,name:j.name,images:j.images})));
       }
     }
   }
-  /* still short: fill from your liked songs (low similarity, so they only take leftover slots) */
-  if(!r.playlist&&cand.size<count)liked.forEach(addC);
+  /* Unrelated library tracks can fill shortages in ordinary stations only. */
+  if(cand.size<count)liked.forEach(addC);
 
   const list=[...cand.values()];
   const artOf=t=>art.get(lc(t.artists[0]?.name));
@@ -1076,17 +1242,17 @@ async function radioBatch(r,opts={}){
   /* weighted pick of the batch, then the usual spacing pass on just those */
   const picked=list.map(t=>({t,k:Math.log(Math.random())/(weightOf(t)*mult(t))})).sort((a,b)=>b.k-a.k).slice(0,count).map(x=>x.t);
   const out=shuffleTracks(picked,mult).map(t=>({...t,radio:true,lb:usersOf(artOf(t))??undefined}));
-  if(r.playlist)r.candidateWeights=new Map(out.map(t=>[t.uri,mult(t)]));
   if(commit)out.forEach(t=>{r.seen.add(t.uri);r.seen.add(songKey(t))});
   return out;
 }
 
 /* Generation owns its exclusion and catalogue copies until installation succeeds. */
 async function buildPlaylistBatch(r,mix,blocked,seen){
-  const work={...r,seen:new Set(seen),albumsDone:[...(r.albumsDone||[])]};
+  const work={...r,anchorCursor:Number.isInteger(r.anchorCursor)?r.anchorCursor:0,
+    seen:new Set(seen),albumsDone:[...(r.albumsDone||[])]};
   const sources=shuffleTracks(r.playlist.tracks.filter(t=>!blocked.has(t.uri)&&!blocked.has(songKey(t))));
   const discoveryExclusions=new Set([...seen,...blocked,...trackIdentities(r.playlist.tracks)]);
-  const discoveries=mix===100?[]:await radioBatch(work,{count:RADIO_BATCH,seen:discoveryExclusions,commit:false});
+  const discoveries=mix===100?[]:await playlistRadioBatch(work,RADIO_BATCH,discoveryExclusions,false);
   const target=Math.round(RADIO_BATCH*mix/100);
   let nSource=Math.min(target,sources.length),nDiscovery=Math.min(RADIO_BATCH-target,discoveries.length);
   if(mix>0&&mix<100){
@@ -1096,8 +1262,11 @@ async function buildPlaylistBatch(r,mix,blocked,seen){
   const tag=(t,blendSource)=>({...t,radio:true,blendStation:r.playlist.id,blendSource});
   const picked=[...sources.slice(0,nSource).map(t=>tag(t,'playlist')),
     ...discoveries.slice(0,nDiscovery).map(t=>tag(t,'discovery'))];
+  /* Mix selection happens before spacing: a small discovery share keeps the
+     branch-balanced prefix produced by playlistRadioBatch. */
   const tracks=shuffleTracks(picked,t=>t.blendSource==='discovery'?(work.candidateWeights?.get(t.uri)||1):1);
   return {tracks,albumsDone:work.albumsDone,
+    anchorCursor:work.anchorCursor,
     shortfall:nSource<target||nDiscovery<RADIO_BATCH-target};
 }
 
@@ -1113,6 +1282,7 @@ function commitPlaylistBatch(r,b,released=new Set(),protectedIds=new Set()){
   for(const id of released)if(!protectedIds.has(id))r.seen.delete(id);
   for(const t of b.tracks)if(t.blendSource==='discovery'){r.seen.add(t.uri);r.seen.add(songKey(t))}
   r.albumsDone=b.albumsDone;
+  if(Number.isInteger(b.anchorCursor))r.anchorCursor=b.anchorCursor;
 }
 function playlistShortfall(b,mix){
   if(mix>0&&mix<100&&b.shortfall)toast('Not enough tracks for the requested mix; using the available tracks');
@@ -1122,11 +1292,12 @@ async function startPlaylistRadio(tracks,p){
   const sources=playlistSource(tracks);
   if(!sources.length)return toast('No playable tracks to seed this playlist');
   if(!deviceId)return toast('Player is not ready yet');
+  player?.activateElement?.();
   const activeView=view,loaded=viewList,viewVersion=viewToken,captured=capturePlaylistQueue();
   const button=main.querySelector('[data-act="playlist-radio"]');
   if(button){button.disabled=true;button.textContent='BUILDING…'}
   const mix=radio?.playlist?.id===p.id?radio.playlist.mix:playlistMix;
-  const r={seed:{name:p.name},artists:playlistArtists(sources),started:Date.now(),seen:new Set(),busy:false,
+  const r={seed:{name:p.name},artists:playlistArtists(sources),anchorCursor:0,started:Date.now(),seen:new Set(),busy:false,
     playlist:{id:p.id,name:p.name,tracks:sources,mix}};
   try{
     const b=await buildPlaylistBatch(r,mix,new Set(),r.seen);
@@ -1137,6 +1308,7 @@ async function startPlaylistRadio(tracks,p){
     const playing=mode==='queue'&&ps.active&&sameTrack(b.tracks[0],queue[idx])&&sameTrack(queue[idx],ps.track);
     if(playing){
       queue=[...queue.slice(0,idx+1),...b.tracks.slice(1)];markDirty();
+      requestPlaylistBatch(r);
     }else{
       if(mode==='queue'&&queue[idx]&&ps.active)record(queue[idx],curPos(),true);
       queue=b.tracks;idx=-1;await playAt(0);
@@ -1165,6 +1337,7 @@ function requestPlaylistBatch(r,{replace=false}={}){
 }
 async function runPlaylistJob(r,job){
   if(job.running||job.timer||!job.pending||radio!==r||mode!=='queue')return;
+  if(!job.replace&&queue.length-idx-1>=RADIO_LOW){job.pending=false;return}
   const replace=job.replace,version=job.version,captured=capturePlaylistQueue(),mix=r.playlist.mix;
   job.pending=false;job.replace=false;job.running=true;r.busy=true;renderQueue();
   const generated=t=>t.blendStation===r.playlist.id&&!!t.blendSource;
@@ -1254,13 +1427,17 @@ function togglePlay(){
 }
 function next(){
   if(mode==='context')return player?.nextTrack();
-  if(idx+1<queue.length)playAt(idx+1);
+  if(idx+1<queue.length)return playAt(idx+1);
   else toast('End of queue');
 }
 function prev(){
   if(mode==='context')return player?.previousTrack();
-  if(curPos()>3000||idx<=0)return player?.seek(0);
-  playAt(idx-1);
+  if(idx<=0||(!switching&&curPos()>3000)){
+    /* A second Previous press must see the restart before the SDK acknowledges the seek. */
+    ps.pos=0;ps.ts=Date.now();
+    return player?.seek(0);
+  }
+  return playAt(idx-1);
 }
 
 function onState(s){
@@ -1272,7 +1449,7 @@ function onState(s){
 
   const match=t=>sameTrack(t,cur);
   if(switching){
-    if(match(queue[switching.i])||Date.now()>switching.until)switching=null;
+    if(!switching.pending&&(match(queue[switching.i])||Date.now()>switching.until))switching=null;
     else{renderNow();renderPlayer();return}
   }
   const winEnd=sent?Math.min(queue.length,sent.start+sent.uris.length):queue.length;
@@ -1438,7 +1615,7 @@ const isCur=t=>{const c=curTrack();return c&&t&&c.uri===t.uri};
 function rowsHTML(list,{album=true,note}={}){
   return '<div class="rows">'+list.map((t,i)=>{
     const lk=likedSet.has(t.uri);
-    return `<div class="row${album?'':' noalb'}${t.playable===false?' dim':''}${isCur(t)?' cur':''}" data-i="${i}" data-uri="${esc(t.uri)}">
+    return `<div class="row${album?'':' noalb'}${t.playable===false?' dim':''}${isCur(t)?' cur':''}" data-i="${i}" data-uri="${esc(t.uri)}" tabindex="0">
 <span class="n"><span class="num">${i+1}</span><a class="pl" data-act="play" title="Play, and build a radio queue from it">►</a></span>
 <div class="ell"><div class="ell">${esc(t.name)}</div><div class="sub ell">${artistsHTML(t)}</div></div>
 ${note?`<div class="alb ell">${esc(note(t))}</div>`:album?`<div class="alb ell">${t.album?.id?`<a data-act="album" data-id="${esc(t.album.id)}">${esc(t.album.name)}</a>`:esc(t.album?.name||'')}</div>`:''}
@@ -1652,7 +1829,7 @@ function renderQueue(state){
     if(!queue.length){ql.innerHTML='<p class="muted" style="padding:16px">Empty. Play any track to start a radio queue from it.</p>';return}
   const upcoming=queue.length-idx-1;
   const shown=queue.slice(idx+1,idx+1+300);
-  const item=(t,i,cls='')=>`<div class="qi ${cls}" data-qi="${i}">
+  const item=(t,i,cls='')=>`<div class="qi ${cls}" data-qi="${i}" tabindex="0">
 <span class="n faint">${cls?'►':i-idx}</span>
 <div class="ell"><div class="ell">${esc(t.name)}</div><div class="sub ell">${esc(t.artists.map(a=>a.name).join(', '))}</div></div>
 <div class="qalb faint ell">${lc(t.album?.name)===lc(t.name)?'':esc(t.album?.name||'')}</div>
@@ -1714,6 +1891,176 @@ document.addEventListener('input',e=>{if(e.target.type==='range')paintRange(e.ta
    EVENTS
    ═══════════════════════════════════════ */
 function trackFromEl(el){const r=el.closest('.row');return r?viewList[+r.dataset.i]:null}
+const trackMenu=$('#trackMenu');
+let trackMenuState=null;
+function menuConnected(el){return !!el&&(el===document||document.contains(el))}
+function menuItemHTML(act,label,disabled=false){
+  return `<button type="button" role="menuitem" data-menu-act="${act}"${disabled?' disabled aria-disabled="true"':''}>${label}</button>`;
+}
+function menuTrackPlayable(t){return !!t&&t.playable!==false}
+function menuCanPlaylist(t){return menuTrackPlayable(t)&&!t.is_local&&typeof t.uri==='string'&&t.uri.startsWith('spotify:track:')}
+function menuItems(){return [...trackMenu.querySelectorAll('[role="menuitem"]')].filter(b=>!b.disabled)}
+function menuFocusFirst(){menuItems()[0]?.focus()}
+function closeTrackMenu(restore=false){
+  const origin=trackMenuState?.origin;
+  trackMenuState=null;
+  trackMenu.classList.add('hidden');
+  trackMenu.innerHTML='';
+  if(restore&&menuConnected(origin))origin.focus?.();
+}
+function menuViewport(){
+  const w=Number.isFinite(innerWidth)?innerWidth:1024,h=Number.isFinite(innerHeight)?innerHeight:768;
+  const r=trackMenu.getBoundingClientRect();
+  return{w,h,r};
+}
+function placeTrackMenu(x,y){
+  const {w,h,r}=menuViewport();
+  const left=Math.max(8,Math.min(Number.isFinite(x)?x:8,w-r.width-8));
+  const top=Math.max(8,Math.min(Number.isFinite(y)?y:8,h-r.height-8));
+  trackMenu.style.left=left+'px';
+  trackMenu.style.top=top+'px';
+}
+function queueMenuIndex(s){
+  if(!s||s.source!=='queue'||mode!=='queue')return-1;
+  const i=queue.indexOf(s.track);
+  return i>=0&&queue[i]===s.track?i:-1;
+}
+function renderTrackMenu(){
+  const s=trackMenuState;if(!s)return;
+  const t=s.track,playable=menuTrackPlayable(t),playlistOK=menuCanPlaylist(t);
+  trackMenu.setAttribute('aria-label','Track actions for '+(t?.name||'track'));
+  const qi=queueMenuIndex(s),inQueue=qi>=0;
+  if(s.picker){
+    const ps=writablePlaylists();
+    trackMenu.innerHTML=`<div class="mtitle">Add “${esc(t?.name||'track')}” to playlist</div>`+
+      (s.busy?'<div class="msection">Adding…</div>':'')+
+      (s.error?`<div class="merror" role="alert">${esc(s.error)}${s.reconnect?`<br>${menuItemHTML('reconnect','Reconnect Spotify')}`:''}</div>`:'')+
+      (ps.length?'<div class="msection">Writable playlists</div>'+ps.map(p=>`<button type="button" role="menuitem" data-menu-act="playlist" data-menu-playlist="${esc(p.id)}"${s.busy?' disabled aria-disabled="true"':''}>${esc(p.name)}${typeof p.total==='number'?' · '+p.total:''}</button>`).join(''):'<div class="mempty">No writable playlists.</div>')+
+      menuItemHTML('back','◄ Back',s.busy);
+    placeTrackMenu(parseFloat(trackMenu.style.left)||8,parseFloat(trackMenu.style.top)||8);
+    return;
+  }
+  const like=likedSet.has(t?.uri);
+  trackMenu.innerHTML=`<div class="mtitle" id="trackMenuTitle">${esc(t?.name||'Track')}</div>`+
+    menuItemHTML('next','Play next',!playable|| (s.source==='queue'&&(!inQueue||qi<=idx)))+
+    menuItemHTML('queue','Add to queue',!playable)+
+    menuItemHTML('playlist','Add to playlist…',!playlistOK)+
+    menuItemHTML('like',like?'Unlike':'Like',!t?.uri)+
+    menuItemHTML('radio','Start radio',!playable)+
+    (s.source==='queue'?menuItemHTML('remove','Remove from queue',!inQueue||qi===idx):'')+
+    '<div class="msection">Browser</div>'+
+    menuItemHTML('native','Browser menu on next right-click',false);
+  placeTrackMenu(parseFloat(trackMenu.style.left)||8,parseFloat(trackMenu.style.top)||8);
+}
+function openTrackMenu(track,source,origin,x,y){
+  closeTrackMenu(false);
+  trackMenuState={track,source,origin,picker:false,busy:false,error:'',reconnect:false};
+  trackMenu.classList.remove('hidden');
+  trackMenu.style.left=(Number.isFinite(x)?x:8)+'px';
+  trackMenu.style.top=(Number.isFinite(y)?y:8)+'px';
+  renderTrackMenu();
+  menuFocusFirst();
+}
+function menuError(message,reconnect=false){
+  if(!trackMenuState)return;
+  trackMenuState.error=message;trackMenuState.reconnect=reconnect;trackMenuState.busy=false;
+  renderTrackMenu();menuFocusFirst();
+}
+async function menuAddPlaylist(id){
+  const s=trackMenuState;if(!s||s.busy)return;
+  const p=writablePlaylists().find(x=>x.id===id);
+  if(!p)return menuError('That playlist is no longer writable. Choose another playlist.');
+  s.busy=true;s.error='';s.reconnect=false;renderTrackMenu();
+  try{
+    await addTrackToPlaylist(s.track,id);
+    if(trackMenuState===s)closeTrackMenu(true);
+  }catch(e){
+    if(trackMenuState===s)menuError(e.message||'Could not add track to playlist.',e.status===403);
+  }
+}
+function activateTrackMenu(el){
+  const s=trackMenuState;if(!s||!el||el.disabled)return;
+  const act=el.dataset.menuAct||'';
+  if(el.dataset.menuPlaylist)return menuAddPlaylist(el.dataset.menuPlaylist);
+  if(act==='back'){s.picker=false;s.error='';s.reconnect=false;renderTrackMenu();menuFocusFirst();return}
+  if(act==='reconnect')return login();
+  if(act==='native'){
+    browserMenuOnce=true;closeTrackMenu(true);toast('Next right-click uses the browser menu');return;
+  }
+  const t=s.track;
+  if(act==='playlist'){s.picker=true;s.error='';s.reconnect=false;renderTrackMenu();menuFocusFirst();return}
+  if(act==='next'){
+    if(s.source==='queue'){
+      const i=queueMenuIndex(s);
+      if(i<0||i<=idx){toast('That queue item is no longer available');return closeTrackMenu(true)}
+      moveNext(i);
+    }else if(menuTrackPlayable(t))playNext([t]);
+    return closeTrackMenu(true);
+  }
+  if(act==='queue'){if(menuTrackPlayable(t))addToQueue([t]);return closeTrackMenu(true)}
+  if(act==='like'){if(t?.uri)toggleLike(t);return closeTrackMenu(true)}
+  if(act==='radio'){if(menuTrackPlayable(t))startRadio(t);return closeTrackMenu(true)}
+  if(act==='remove'){
+    const i=queueMenuIndex(s);
+    if(i<0||i===idx){toast('That track is playing or no longer in the queue');return closeTrackMenu(true)}
+    removeAt(i);return closeTrackMenu(true);
+  }
+}
+trackMenu.addEventListener('click',e=>{
+  const button=e.target.closest('[data-menu-act]');
+  if(!button||!trackMenu.contains(button))return;
+  e.preventDefault();e.stopPropagation();activateTrackMenu(button);
+});
+function handleTrackMenuKeydown(e){
+  if(!trackMenuState||!trackMenu.contains(e.target))return;
+  const items=menuItems(),current=e.target.closest?.('[role="menuitem"]'),at=items.indexOf(current);
+  if(e.key==='Escape'){e.preventDefault?.();closeTrackMenu(true);return}
+  if(e.key==='Tab'){closeTrackMenu(true);return}
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Home'||e.key==='End'){
+    e.preventDefault?.();
+    if(!items.length)return;
+    const next=e.key==='Home'?0:e.key==='End'?items.length-1:
+      (at<0?0:(at+(e.key==='ArrowDown'?1:-1)+items.length)%items.length);
+    items[next].focus();return;
+  }
+  if((e.key==='Enter'||e.key===' ')&&current){e.preventDefault?.();activateTrackMenu(current)}
+}
+trackMenu.addEventListener('keydown',e=>{if(trackMenuState&&trackMenu.contains(e.target)){e.stopPropagation?.();handleTrackMenuKeydown(e)}});
+function contextTrackTarget(target){
+  const r=target?.closest?.('.row');
+  if(r&&main.contains(r)&&main.contains(target)){
+    const t=viewList[+r.dataset.i];if(t)return{track:t,source:'main',origin:r};
+  }
+  const q=$('#ql'),it=target?.closest?.('[data-qi]');
+  if(mode==='queue'&&it&&q.contains(it)&&q.contains(target)){
+    const t=queue[+it.dataset.qi];if(t)return{track:t,source:'queue',origin:it};
+  }
+  return null;
+}
+function contextPoint(target,e){
+  const r=target?.getBoundingClientRect?.()||{left:8,top:8,bottom:28};
+  return{ x:Number.isFinite(e?.clientX)?e.clientX:r.left, y:Number.isFinite(e?.clientY)?e.clientY:r.bottom };
+}
+document.addEventListener('contextmenu',e=>{
+  if(browserMenuOnce){browserMenuOnce=false;return closeTrackMenu(false)}
+  const hit=contextTrackTarget(e.target);
+  if(!hit||e.shiftKey)return closeTrackMenu(false);
+  e.preventDefault?.();
+  const p=contextPoint(e.target,e);
+  openTrackMenu(hit.track,hit.source,hit.origin,p.x,p.y);
+});
+document.addEventListener('pointerdown',e=>{if(trackMenuState&&!trackMenu.contains(e.target))closeTrackMenu(false)});
+document.addEventListener('scroll',e=>{if(trackMenuState&&!trackMenu.contains(e.target))closeTrackMenu(false)},true);
+addEventListener('resize',()=>{if(trackMenuState)closeTrackMenu(false)});
+document.addEventListener('keydown',e=>{
+  if(e.key==='ContextMenu'||(e.key==='F10'&&e.shiftKey)){
+    const hit=contextTrackTarget(e.target);
+    if(!hit||browserMenuOnce)return closeTrackMenu(false);
+    e.preventDefault?.();
+    const p=contextPoint(hit.origin,{});
+    openTrackMenu(hit.track,hit.source,hit.origin,p.x,p.y);
+  }
+});
 document.addEventListener('click',e=>{
   const g=e.target.closest('[data-go]');
   if(g){e.preventDefault();return go(g.dataset.go,g.dataset.id)}
@@ -1818,6 +2165,7 @@ $('#q').addEventListener('input',e=>{clearTimeout(qT);const v=e.target.value.tri
 $('#q').addEventListener('keydown',e=>{if(e.key==='Enter'){clearTimeout(qT);go('search',e.target.value.trim(),view.type!=='search')}if(e.key==='Escape')e.target.blur()});
 
 document.addEventListener('keydown',e=>{
+  if(trackMenuState)return;
   if(e.target.matches('input[type=text],input[type=search],input[data-playlist-mix]'))return;
   if(e.key===' '){e.preventDefault();togglePlay()}
   else if(e.key==='/'){e.preventDefault();$('#q').focus();$('#q').select()}

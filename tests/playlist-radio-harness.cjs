@@ -25,6 +25,91 @@ function selectorPart(selector) {
   return selector.trim().split(/\s+/).at(-1);
 }
 
+const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+
+
+function findTagEnd(markup, start) {
+  let quote = '';
+  for (let i = start; i < markup.length; i += 1) {
+    const char = markup[i];
+    if (quote) {
+      if (char === quote) quote = '';
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '>') {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function applyAttributes(element, source) {
+  for (const attr of source.matchAll(/([:\w-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+    const name = attr[1], valueText = attr[2] ?? attr[3] ?? attr[4] ?? '';
+    element.attributes.set(name, valueText);
+    if (name === 'id') {
+      element.id = valueText;
+      element.ownerDocument?.ids?.set(valueText, element);
+    } else if (name === 'class') {
+      valueText.split(/\s+/).filter(Boolean).forEach(c => element.classList.add(c));
+    } else if (name.startsWith('data-')) {
+      element.dataset[dataName(name)] = valueText;
+    } else if (name === 'value') {
+      element.value = valueText;
+    } else if (name === 'type') {
+      element.type = valueText;
+    } else if (name === 'min' || name === 'max') {
+      element[name] = valueText;
+    } else if (name === 'disabled') {
+      element.disabled = true;
+    } else {
+      element[name] = valueText;
+    }
+  }
+}
+
+function parseMarkup(root, markup) {
+  const stack = [root];
+  let cursor = 0;
+  while (cursor < markup.length) {
+    const start = markup.indexOf('<', cursor);
+    if (start < 0) break;
+    if (markup.startsWith('<!--', start)) {
+      const commentEnd = markup.indexOf('-->', start + 4);
+      cursor = commentEnd < 0 ? markup.length : commentEnd + 3;
+      continue;
+    }
+    const end = findTagEnd(markup, start + 1);
+    if (end < 0) break;
+    const token = markup.slice(start, end + 1);
+    const closing = token.match(/^<\s*\/\s*([a-z][\w-]*)[^>]*>$/i);
+    if (closing) {
+      const name = closing[1].toUpperCase();
+      for (let i = stack.length - 1; i > 0; i -= 1) {
+        if (stack[i].tagName === name) {
+          stack.length = i;
+          break;
+        }
+      }
+      cursor = end + 1;
+      continue;
+    }
+    const opening = token.match(/^<\s*([a-z][\w-]*)([\s\S]*)>$/i);
+    if (!opening || token.startsWith('<!') || token.startsWith('<?')) {
+      cursor = end + 1;
+      continue;
+    }
+    const tagName = opening[1];
+    const attributes = opening[2];
+    const selfClosing = /\/\s*$/.test(attributes);
+    const child = new FakeElement(root.ownerDocument, tagName);
+    applyAttributes(child, selfClosing ? attributes.replace(/\/\s*$/, '') : attributes);
+    stack.at(-1).appendChild(child);
+    if (!selfClosing && !VOID_ELEMENTS.has(tagName.toLowerCase())) stack.push(child);
+    cursor = end + 1;
+  }
+}
+
 function matches(element, selector) {
   selector = selectorPart(selector);
   if (selector.includes(',')) return selector.split(',').some(part => matches(element, part));
@@ -70,34 +155,9 @@ class FakeElement {
   }
   set innerHTML(value) {
     this._innerHTML = String(value);
+    for (const child of this.children) child.parentElement = null;
     this.children = [];
-    const tagPattern = /<([a-z][\w-]*)([^>]*)>/gi;
-    for (const match of this._innerHTML.matchAll(tagPattern)) {
-      const child = new FakeElement(this.ownerDocument, match[1]);
-      const attrs = match[2];
-      for (const attr of attrs.matchAll(/([:\w-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
-        const name = attr[1], valueText = attr[2] ?? attr[3] ?? attr[4] ?? '';
-        child.attributes.set(name, valueText);
-        if (name === 'id') { child.id = valueText; this.ownerDocument.ids.set(valueText, child); }
-        else if (name === 'class') valueText.split(/\s+/).filter(Boolean).forEach(c => child.classList.add(c));
-        else if (name.startsWith('data-')) child.dataset[dataName(name)] = valueText;
-        else if (name === 'value') child.value = valueText;
-        else if (name === 'type') child.type = valueText;
-        else if (name === 'min' || name === 'max') child[name] = valueText;
-        else if (name === 'disabled') child.disabled = true;
-        else child[name] = valueText;
-      }
-      child.parentElement = this;
-      this.children.push(child);
-    }
-    const mixInputs = this.children.filter(child => child.dataset.playlistMix !== undefined);
-    for (const input of mixInputs) {
-      this.children = this.children.filter(child => child !== input);
-      const label = new FakeElement(this.ownerDocument, 'label');
-      label.appendChild(new FakeElement(this.ownerDocument, 'output'));
-      label.appendChild(input);
-      this.appendChild(label);
-    }
+    parseMarkup(this, this._innerHTML);
   }
   get innerHTML() { return this._innerHTML; }
   set outerHTML(value) { this.innerHTML = value; }
@@ -116,7 +176,8 @@ class FakeElement {
     this.listeners.set(type, listeners);
   }
   dispatch(type, event = {}) {
-    const e = { type, target: this, currentTarget: this, preventDefault() {}, ...event };
+    const e = { type, target: this, currentTarget: this, defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...event };
     if (type === 'click' && this.onclick) this.onclick(e);
     if (type === 'input' && this.oninput) this.oninput(e);
     for (const listener of this.listeners.get(type) || []) listener(e);
@@ -126,6 +187,10 @@ class FakeElement {
   focus() { this.ownerDocument.activeElement = this; }
   blur() { if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null; }
   select() {}
+  contains(element) {
+    for (let node = element; node; node = node.parentElement) if (node === this) return true;
+    return false;
+  }
   matches(selector) { return matches(this, selector); }
   closest(selector) {
     for (let node = this; node; node = node.parentElement) if (matches(node, selector)) return node;
@@ -143,7 +208,7 @@ class FakeElement {
     return out;
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
-  getBoundingClientRect() { return { left: 0, width: 100 }; }
+  getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100 }; }
 }
 
 class FakeDocument extends FakeElement {
@@ -161,7 +226,7 @@ class FakeDocument extends FakeElement {
     this.documentElement.appendChild(this.body);
     for (const id of ['gate','gateSetup','gateLogin','gateErr','redir','cid','saveCid','loginBtn','resetCid',
       'main','status','toast','pls','nav','genres','genreBtn','qset','ql','now','likeNow','pp','shuf','bar',
-      'barFill','tpos','tdur','vol','back','theme','q','qclose','qtoggle','next','prev','radioNow']) {
+      'barFill','tpos','tdur','vol','back','theme','q','qclose','qtoggle','next','prev','radioNow','trackMenu']) {
       const element = new FakeElement(this, id === 'q' || id === 'vol' || id === 'cid' ? 'input' : 'div', id);
       this.ids.set(id, element);
       this.body.appendChild(element);
@@ -216,7 +281,8 @@ function createHarness({ storage = {}, random = () => 0.5 } = {}) {
   const context = vm.createContext({
     console: { log() {}, warn() {}, error() {} }, document, localStorage,
     location: { origin: 'http://example.test', pathname: '/', search: '', href: '' },
-    history: { replaceState() {} }, navigator: {}, innerWidth: 1280,
+    history: { replaceState() {} }, navigator: {}, innerWidth: 1280, innerHeight: 768,
+    addEventListener: document.addEventListener.bind(document),
     CSS: { escape: value => String(value).replace(/["\\]/g, '\\$&') },
     MediaMetadata: class MediaMetadata { constructor(data) { Object.assign(this, data); } },
     URL, URLSearchParams, TextEncoder, Uint8Array, Set, Map, WeakMap, Promise, Error, JSON, Math: Object.create(Math),
