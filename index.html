@@ -275,6 +275,7 @@ input[type=range]:disabled{opacity:.4;cursor:default}
         <button class="big" id="pp" title="Play / pause (Space)">►</button>
         <button class="big" id="next" title="Next (Shift+→)">►►</button>
         <button class="ib" id="likeNow" title="Like (L)">♡</button>
+        <button class="ib" id="carNow" title="Add to car playlist 6 (C)">❥&#xFE0E;</button>
         <button class="ib" id="radioNow" title="Start radio from this track (R)">◉</button>
       </div>
       <div class="prog"><span id="tpos">0:00</span><div class="bar" id="bar"><i id="barFill"></i></div><span id="tdur">0:00</span></div>
@@ -349,7 +350,7 @@ const lc=s=>(s||'').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g,'').trim(
 /* ═══════════════════════════════════════
    AUTH — PKCE, no secret
    ═══════════════════════════════════════ */
-const SCOPES='streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state user-library-read user-library-modify playlist-read-private playlist-read-collaborative user-read-recently-played user-top-read';
+const SCOPES='streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state user-library-read user-library-modify playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private user-read-recently-played user-top-read';
 const REDIRECT=location.origin+location.pathname.replace(/index\.html$/,'');
 let clientId=LS.get('clientId','');
 let tok=LS.get('tok',null);
@@ -373,7 +374,7 @@ async function tokenReq(params){
     if(params.grant_type==='refresh_token'){tok=null;LS.del('tok');showGate()}
     throw new Error(j.error_description||j.error||'token request failed');
   }
-  tok={access:j.access_token,refresh:j.refresh_token||tok?.refresh,exp:Date.now()+(j.expires_in-60)*1000};
+  tok={access:j.access_token,refresh:j.refresh_token||tok?.refresh,scope:j.scope??tok?.scope,exp:Date.now()+(j.expires_in-60)*1000};
   LS.set('tok',tok);
   return tok;
 }
@@ -498,6 +499,36 @@ async function toggleLike(t){
   toast(on?'Removed from Liked Songs':'Added to Liked Songs');
 }
 
+/* one-tap add to a fixed playlist */
+const CAR_NAME='car playlist 6';
+let car={id:null,uris:null};
+const carPlaylist=()=>playlists.find(p=>lc(p.name)===CAR_NAME);
+async function loadCar(){
+  const p=carPlaylist();if(!p||!p.readable)return null;
+  if(car.id!==p.id)car={id:p.id,uris:null};
+  if(!car.uris){
+    const uris=await getAll('/playlists/'+p.id+'/items',{limit:50},it=>(it.item||it.track)?.uri,Infinity);
+    if(car.id===p.id)car.uris=new Set(uris);
+  }
+  return p;
+}
+function renderCar(){const t=curTrack();$('#carNow').classList.toggle('on',!!(t&&car.uris?.has(t.uri)))}
+async function addToCar(t){
+  if(!t)return toast('Nothing playing');
+  const p=carPlaylist();
+  if(!p)return toast('No playlist named "'+CAR_NAME+'"');
+  if(!p.readable)return toast('"'+p.name+'" is not yours to edit');
+  const needAuth=()=>{toast('Sign in again to allow playlist edits');setTimeout(login,1200)};
+  if(tok?.scope&&!/playlist-modify-(private|public)/.test(tok.scope))return needAuth();
+  try{
+    await loadCar();
+    if(car.uris?.has(t.uri)){renderCar();return toast('Already in '+p.name)}
+    await api('/playlists/'+p.id+'/items',{method:'POST',body:{uris:[t.uri]}});
+  }catch(e){return /scope|forbidden|403/i.test(e.message)?needAuth():toast('Add failed: '+e.message)}
+  car.uris?.add(t.uri);p.total=(p.total||0)+1;
+  renderCar();toast('Added to '+p.name);
+}
+
 async function loadPlaylists(){
   playlists=await getAll('/me/playlists',{limit:50},p=>p&&{
     id:p.id,uri:p.uri,name:p.name,img:pickImg(p.images,120),
@@ -506,6 +537,7 @@ async function loadPlaylists(){
     readable:p.owner?.id===me?.id||p.collaborative});
   $('#pls').innerHTML=playlists.map(p=>`<a class="it" data-go="playlist" data-id="${esc(p.id)}" title="${esc(p.name)}${p.readable?'':' (play only)'}">${p.readable?'▪':'▫'} ${esc(p.name)}</a>`).join('')||'<div class="it muted">none</div>';
   markNav();
+  loadCar().then(renderCar).catch(()=>{});
 }
 
 /* ═══════════════════════════════════════
@@ -1616,10 +1648,10 @@ function renderDiscoverResults(){
    ═══════════════════════════════════════ */
 function renderNow(){
   const t=curTrack();
-  if(!t){$('#now').innerHTML='<span class="muted">nothing playing</span>';$('#likeNow').textContent=HEART_O;document.title='Needle';return}
+  if(!t){$('#now').innerHTML='<span class="muted">nothing playing</span>';$('#likeNow').textContent=HEART_O;renderCar();document.title='Needle';return}
   $('#now').innerHTML=artHTML(t.album?.img)+`<div class="tt"><div class="ell">${t.album?.id?`<a data-act="album" data-id="${esc(t.album.id)}">${esc(t.name)}</a>`:esc(t.name)}</div><div class="ell muted">${artistsHTML(t)}</div></div>`;
   const lk=likedSet.has(t.uri);
-  $('#likeNow').textContent=lk?HEART:HEART_O;$('#likeNow').classList.toggle('on',lk);
+  $('#likeNow').textContent=lk?HEART:HEART_O;$('#likeNow').classList.toggle('on',lk);renderCar();
   document.title=(ps.active&&!ps.paused?'► ':'')+t.name+' · '+(t.artists[0]?.name||'');
   if('mediaSession' in navigator){
     navigator.mediaSession.metadata=new MediaMetadata({title:t.name,artist:t.artists.map(a=>a.name).join(', '),album:t.album?.name||'',artwork:t.album?.img?[{src:t.album.img}]:[]});
@@ -1801,6 +1833,7 @@ $('#next').onclick=next;
 $('#prev').onclick=prev;
 $('#shuf').onclick=()=>setShuffle(mode==='context'?!ctxShuffle:!shuffleOn);
 $('#likeNow').onclick=()=>toggleLike(curTrack());
+$('#carNow').onclick=()=>addToCar(curTrack());
 $('#radioNow').onclick=()=>startRadio(curTrack());
 $('#bar').onclick=e=>{
   const r=e.currentTarget.getBoundingClientRect(),d=ps.dur||curTrack()?.ms||0;
@@ -1828,6 +1861,7 @@ document.addEventListener('keydown',e=>{
   else if(e.key==='s'&&!e.ctrlKey&&!e.metaKey)$('#shuf').click();
   else if(e.key==='l'&&!e.ctrlKey&&!e.metaKey)toggleLike(curTrack());
   else if(e.key==='r'&&!e.ctrlKey&&!e.metaKey)startRadio(curTrack());
+  else if(e.key==='c'&&!e.ctrlKey&&!e.metaKey)addToCar(curTrack());
 });
 if('mediaSession' in navigator){
   const ms=navigator.mediaSession;
